@@ -5,15 +5,19 @@ import { useCallback, useRef, useState } from 'react';
 interface Props {
   onStart: (files: File[], outW: number, outH: number, instruction: string) => void;
   busy: boolean;
+  initialFiles?: File[];
+  initialW?: number;
+  initialH?: number;
+  initialInstruction?: string;
 }
 
 const ACCEPT = /\.(jpe?g|png|webp|tiff?)$/i;
 
-export default function Uploader({ onStart, busy }: Props) {
-  const [files, setFiles] = useState<File[]>([]);
-  const [outW, setOutW] = useState(750);
-  const [outH, setOutH] = useState(750);
-  const [instruction, setInstruction] = useState('Center the product perfectly.');
+export default function Uploader({ onStart, busy, initialFiles, initialW, initialH, initialInstruction }: Props) {
+  const [files, setFiles] = useState<File[]>(initialFiles ?? []);
+  const [outW, setOutW] = useState(initialW ?? 750);
+  const [outH, setOutH] = useState(initialH ?? 750);
+  const [instruction, setInstruction] = useState(initialInstruction ?? 'Center the product perfectly.');
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 

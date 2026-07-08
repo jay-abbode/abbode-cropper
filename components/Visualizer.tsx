@@ -11,11 +11,12 @@ interface Props {
   index: number;
   total: number;
   logLines: string[];
+  onAbort: () => void;
 }
 
 const STAGE_MS = [900, 500, 500, 650]; // scan, bbox, axis, crop-frame
 
-export default function Visualizer({ currentName, currentUrl, currentMeta, done, index, total, logLines }: Props) {
+export default function Visualizer({ currentName, currentUrl, currentMeta, done, index, total, logLines, onAbort }: Props) {
   const [stage, setStage] = useState(0);
 
   useEffect(() => {
@@ -49,7 +50,8 @@ export default function Visualizer({ currentName, currentUrl, currentMeta, done,
       : undefined;
 
   return (
-    <div className="mx-auto flex max-w-4xl flex-col items-center gap-8 md:flex-row md:items-start md:justify-center">
+    <div className="mx-auto flex max-w-4xl flex-col items-center gap-6">
+      <div className="flex w-full flex-col items-center gap-8 md:flex-row md:items-start md:justify-center">
       {/* Ghost alignment stack */}
       <div className="flex flex-col items-center">
         <p className="mb-2 text-sm text-espresso/60">Alignment stack</p>
@@ -125,6 +127,17 @@ export default function Visualizer({ currentName, currentUrl, currentMeta, done,
             </p>
           ))}
         </div>
+      </div>
+      </div>
+
+      <div className="flex flex-col items-center gap-1">
+        <button
+          onClick={onAbort}
+          className="rounded-full border-2 border-berry bg-porcelain px-6 py-2 font-medium text-berry transition hover:bg-berry hover:text-porcelain"
+        >
+          ■ Stop &amp; review
+        </button>
+        <p className="text-xs text-espresso/50">Not looking right? Stop now to check what&apos;s done and reprompt.</p>
       </div>
     </div>
   );

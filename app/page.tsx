@@ -18,6 +18,8 @@ export default function Home() {
   const filesRef = useRef<File[]>([]);
   const urlsRef = useRef<Map<string, string>>(new Map()); // id -> object URL of the uploaded image
   const preparedRef = useRef<Map<string, Blob>>(new Map()); // id -> possibly-downscaled blob actually sent
+  const abortRef = useRef(false); // set by the Stop button to break the batch loop
+  const controllerRef = useRef<AbortController | null>(null); // cancels the in-flight crop request
   const [dims, setDims] = useState({ w: 750, h: 750 });
   const [instruction, setInstruction] = useState('');
   const [spec, setSpec] = useState<CropSpec | null>(null);
@@ -35,6 +37,13 @@ export default function Home() {
 
   const pushLog = (l: string) => setLog((prev) => [...prev, l]);
 
+  // Sleep that resolves immediately if the batch is aborted mid-wait.
+  const sleep = (ms: number, signal?: AbortSignal) =>
+    new Promise<void>((resolve) => {
+      const t = setTimeout(resolve, ms);
+      signal?.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+    });
+
   const parseSpec = useCallback(async (instr: string, feedback?: string, currentSpec?: CropSpec): Promise<CropSpec> => {
     const res = await fetch('/api/parse', {
       method: 'POST',
@@ -46,14 +55,14 @@ export default function Home() {
   }, []);
 
   const cropOne = useCallback(
-    async (blob: Blob, name: string, useSpec: CropSpec, box?: { left: number; top: number; width: number; height: number }) => {
+    async (blob: Blob, name: string, useSpec: CropSpec, box?: { left: number; top: number; width: number; height: number }, signal?: AbortSignal) => {
       const form = new FormData();
       form.append('file', blob, name);
       form.append('outW', String(dims.w));
       form.append('outH', String(dims.h));
       form.append('spec', JSON.stringify(useSpec));
       if (box) form.append('cropBox', JSON.stringify(box));
-      const res = await fetch('/api/crop', { method: 'POST', body: form });
+      const res = await fetch('/api/crop', { method: 'POST', body: form, signal });
       const raw = await res.text();
       if (!res.ok) {
         let msg = `server error ${res.status}`;
@@ -76,10 +85,13 @@ export default function Home() {
       setPhase('processing');
       setResults([]);
       setError(null);
+      abortRef.current = false;
       const files = filesRef.current;
       const MIN_MS = 2700; // let the visualizer breathe per image
+      let completed = 0;
 
       for (let i = 0; i < files.length; i++) {
+        if (abortRef.current) break;
         const f = files[i];
         const id = `${i}-${f.name}`;
         setCurrent({ name: f.name, url: urlsRef.current.get(id) ?? '', meta: null, index: i });
@@ -98,19 +110,27 @@ export default function Home() {
               pushLog(`  downscaled ${(f.size / 1e6).toFixed(1)}→${(blob.size / 1e6).toFixed(1)} MB for upload`);
             }
           }
+          if (abortRef.current) break; // preparing large images can take a moment
           setCurrent({ name: f.name, url, meta: null, index: i });
-          const { png, meta } = await cropOne(blob, f.name, useSpec);
+
+          const controller = new AbortController();
+          controllerRef.current = controller;
+          const { png, meta } = await cropOne(blob, f.name, useSpec, undefined, controller.signal);
+
           pushLog(`  masking subject → figure ${Math.round(meta.figure[2] - meta.figure[0])}×${Math.round(meta.figure[3] - meta.figure[1])}px`);
           setCurrent({ name: f.name, url, meta, index: i });
           if (useSpec.mode === 'face') pushLog(`  symmetry axis @ x=${Math.round(meta.centerFace[0])} (front face)`);
           pushLog(`  normalizing scale, settling crop… ✓`);
           const elapsed = performance.now() - t0;
-          if (elapsed < MIN_MS) await new Promise((r) => setTimeout(r, MIN_MS - elapsed));
+          if (elapsed < MIN_MS) await sleep(MIN_MS - elapsed, controller.signal);
           setResults((prev) => [
             ...prev,
             { id, name: f.name.replace(/\.[^.]+$/, '') + '.png', pngDataUrl: `data:image/png;base64,${png}`, meta, flagged: false },
           ]);
+          completed++;
         } catch (e) {
+          // A user-triggered abort surfaces as an AbortError — that's not a failure.
+          if (abortRef.current || (e instanceof DOMException && e.name === 'AbortError')) break;
           const msg = e instanceof Error ? e.message : 'unknown error';
           pushLog(`  ✗ ${msg}`);
           setError(`Failed on ${f.name}: ${msg}`);
@@ -118,7 +138,16 @@ export default function Home() {
           return;
         }
       }
-      setPhase('review');
+
+      controllerRef.current = null;
+      if (abortRef.current) {
+        pushLog(`■ stopped — ${completed} of ${files.length} cropped`);
+        // Land on the QC carousel if anything finished, so you can inspect and
+        // reprompt; otherwise drop back to setup to rewrite the instruction.
+        setPhase(completed > 0 ? 'review' : 'setup');
+      } else {
+        setPhase('review');
+      }
     },
     [cropOne]
   );
@@ -220,12 +249,21 @@ export default function Home() {
     }
   }, [results, dims]);
 
+  const handleAbort = useCallback(() => {
+    abortRef.current = true;
+    controllerRef.current?.abort(); // cancel the crop request in flight
+    pushLog('■ stopping…');
+  }, []);
+
   const onStartOver = useCallback(() => {
+    abortRef.current = false;
     setPhase('setup');
     setResults([]);
     setSpec(null);
     setLog([]);
     setError(null);
+    // filesRef / dims / instruction are preserved so the Uploader re-seeds and
+    // you can rewrite the instruction without re-selecting the folder.
   }, []);
 
   const editingItem = phase === 'editing' && editQueue.length > 0 ? results.find((r) => r.id === editQueue[0]) : null;
@@ -241,7 +279,16 @@ export default function Home() {
         <p className="mx-auto mb-6 max-w-2xl rounded-lg bg-berry/10 px-4 py-3 text-sm text-berry">{error}</p>
       )}
 
-      {phase === 'setup' && <Uploader onStart={onStart} busy={busy} />}
+      {phase === 'setup' && (
+        <Uploader
+          onStart={onStart}
+          busy={busy}
+          initialFiles={filesRef.current.length ? filesRef.current : undefined}
+          initialW={dims.w}
+          initialH={dims.h}
+          initialInstruction={instruction || undefined}
+        />
+      )}
 
       {phase === 'processing' && (
         <Visualizer
@@ -252,6 +299,7 @@ export default function Home() {
           index={current.index}
           total={filesRef.current.length}
           logLines={log}
+          onAbort={handleAbort}
         />
       )}
 
