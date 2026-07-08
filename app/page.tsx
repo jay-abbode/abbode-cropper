@@ -6,7 +6,7 @@ import Visualizer from '@/components/Visualizer';
 import Carousel from '@/components/Carousel';
 import ManualEditor from '@/components/ManualEditor';
 import { prepareImage } from '@/lib/resize';
-import type { CropSpec, ImageResult } from '@/lib/types';
+import type { CropSpec, ImageResult, RunMode } from '@/lib/types';
 
 type Phase = 'setup' | 'processing' | 'review' | 'editing';
 
@@ -20,6 +20,9 @@ export default function Home() {
   const preparedRef = useRef<Map<string, Blob>>(new Map()); // id -> possibly-downscaled blob actually sent
   const abortRef = useRef(false); // set by the Stop button to break the batch loop
   const controllerRef = useRef<AbortController | null>(null); // cancels the in-flight crop request
+  const resumeIndexRef = useRef(0); // next image to process if a batch was stopped early
+  const modeRef = useRef<RunMode>('default'); // active processing mode for this run
+  const [mode, setMode] = useState<RunMode>('default');
   const [dims, setDims] = useState({ w: 750, h: 750 });
   const [instruction, setInstruction] = useState('');
   const [spec, setSpec] = useState<CropSpec | null>(null);
@@ -34,6 +37,7 @@ export default function Home() {
   });
 
   const [editQueue, setEditQueue] = useState<string[]>([]);
+  const [editTotal, setEditTotal] = useState(0); // size of the current edit session (for "k of N")
 
   const pushLog = (l: string) => setLog((prev) => [...prev, l]);
 
@@ -55,13 +59,14 @@ export default function Home() {
   }, []);
 
   const cropOne = useCallback(
-    async (blob: Blob, name: string, useSpec: CropSpec, box?: { left: number; top: number; width: number; height: number }, signal?: AbortSignal) => {
+    async (blob: Blob, name: string, useSpec: CropSpec, box?: { left: number; top: number; width: number; height: number }, angle?: number, signal?: AbortSignal) => {
       const form = new FormData();
       form.append('file', blob, name);
       form.append('outW', String(dims.w));
       form.append('outH', String(dims.h));
       form.append('spec', JSON.stringify(useSpec));
       if (box) form.append('cropBox', JSON.stringify(box));
+      if (angle !== undefined) form.append('angle', String(angle));
       const res = await fetch('/api/crop', { method: 'POST', body: form, signal });
       const raw = await res.text();
       if (!res.ok) {
@@ -81,17 +86,18 @@ export default function Home() {
   );
 
   const runBatch = useCallback(
-    async (useSpec: CropSpec) => {
+    async (useSpec: CropSpec, startIndex = 0, preserve = false) => {
       setPhase('processing');
-      setResults([]);
+      if (!preserve) setResults([]);
       setError(null);
       abortRef.current = false;
       const files = filesRef.current;
-      const MIN_MS = 2700; // let the visualizer breathe per image
+      const animate = modeRef.current === 'default';
+      const MIN_MS = animate ? 2700 : 0; // Instant / Full-manual run as fast as possible
       let completed = 0;
 
-      for (let i = 0; i < files.length; i++) {
-        if (abortRef.current) break;
+      for (let i = startIndex; i < files.length; i++) {
+        if (abortRef.current) { resumeIndexRef.current = i; break; }
         const f = files[i];
         const id = `${i}-${f.name}`;
         setCurrent({ name: f.name, url: urlsRef.current.get(id) ?? '', meta: null, index: i });
@@ -110,27 +116,34 @@ export default function Home() {
               pushLog(`  downscaled ${(f.size / 1e6).toFixed(1)}→${(blob.size / 1e6).toFixed(1)} MB for upload`);
             }
           }
-          if (abortRef.current) break; // preparing large images can take a moment
+          if (abortRef.current) { resumeIndexRef.current = i; break; }
           setCurrent({ name: f.name, url, meta: null, index: i });
 
           const controller = new AbortController();
           controllerRef.current = controller;
-          const { png, meta } = await cropOne(blob, f.name, useSpec, undefined, controller.signal);
+          const { png, meta } = await cropOne(blob, f.name, useSpec, undefined, undefined, controller.signal);
 
           pushLog(`  masking subject → figure ${Math.round(meta.figure[2] - meta.figure[0])}×${Math.round(meta.figure[3] - meta.figure[1])}px`);
           setCurrent({ name: f.name, url, meta, index: i });
           if (useSpec.mode === 'face') pushLog(`  symmetry axis @ x=${Math.round(meta.centerFace[0])} (front face)`);
-          pushLog(`  normalizing scale, settling crop… ✓`);
+          if (useSpec.straighten && Math.abs(meta.angle) > 0.05) pushLog(`  auto-leveled ${meta.angle > 0 ? '+' : ''}${meta.angle}°`);
+          pushLog(meta.lowConfidence ? '  ⚠ detection unsure — flagged for review' : '  normalizing scale, settling crop… ✓');
           const elapsed = performance.now() - t0;
           if (elapsed < MIN_MS) await sleep(MIN_MS - elapsed, controller.signal);
           setResults((prev) => [
             ...prev,
-            { id, name: f.name.replace(/\.[^.]+$/, '') + '.png', pngDataUrl: `data:image/png;base64,${png}`, meta, flagged: false },
+            {
+              id,
+              name: f.name.replace(/\.[^.]+$/, '') + '.png',
+              pngDataUrl: `data:image/png;base64,${png}`,
+              meta,
+              flagged: modeRef.current === 'manual' ? true : meta.lowConfidence, // manual edits every image; others auto-flag only uncertain crops
+            },
           ]);
           completed++;
         } catch (e) {
           // A user-triggered abort surfaces as an AbortError — that's not a failure.
-          if (abortRef.current || (e instanceof DOMException && e.name === 'AbortError')) break;
+          if (abortRef.current || (e instanceof DOMException && e.name === 'AbortError')) { resumeIndexRef.current = i; break; }
           const msg = e instanceof Error ? e.message : 'unknown error';
           pushLog(`  ✗ ${msg}`);
           setError(`Failed on ${f.name}: ${msg}`);
@@ -141,25 +154,34 @@ export default function Home() {
 
       controllerRef.current = null;
       if (abortRef.current) {
-        pushLog(`■ stopped — ${completed} of ${files.length} cropped`);
-        // Land on the QC carousel if anything finished, so you can inspect and
-        // reprompt; otherwise drop back to setup to rewrite the instruction.
-        setPhase(completed > 0 ? 'review' : 'setup');
+        pushLog(`■ stopped — ${resumeIndexRef.current} of ${files.length} reached`);
+        setPhase(preserve || completed > 0 ? 'review' : 'setup');
       } else {
-        setPhase('review');
+        resumeIndexRef.current = files.length; // finished the batch — nothing to resume
+        if (modeRef.current === 'manual' && completed > 0) {
+          // Full manual: hand every image to the editor in order.
+          const ids = files.map((f, i) => `${i}-${f.name}`);
+          setEditQueue(ids);
+          setEditTotal(ids.length);
+          setPhase('editing');
+        } else {
+          setPhase('review');
+        }
       }
     },
     [cropOne]
   );
 
   const onStart = useCallback(
-    async (files: File[], w: number, h: number, instr: string) => {
+    async (files: File[], w: number, h: number, instr: string, runMode: RunMode) => {
       setBusy(true);
       try {
         filesRef.current = files;
         urlsRef.current.forEach((u) => URL.revokeObjectURL(u));
         urlsRef.current.clear();
         preparedRef.current.clear();
+        modeRef.current = runMode;
+        setMode(runMode);
         setDims({ w, h });
         setInstruction(instr);
         setLog([`Parsing instruction: “${instr}”`]);
@@ -196,7 +218,9 @@ export default function Home() {
   }, []);
 
   const onEditFlagged = useCallback(() => {
-    setEditQueue(results.filter((r) => r.flagged).map((r) => r.id));
+    const ids = results.filter((r) => r.flagged).map((r) => r.id);
+    setEditQueue(ids);
+    setEditTotal(ids.length);
     setPhase('editing');
   }, [results]);
 
@@ -209,14 +233,14 @@ export default function Home() {
   }, []);
 
   const onSaveEdit = useCallback(
-    async (id: string, box: { left: number; top: number; width: number; height: number }) => {
+    async (id: string, box: { left: number; top: number; width: number; height: number }, angle: number) => {
       const idx = parseInt(id.split('-')[0], 10);
       const file = filesRef.current[idx];
       const blob = preparedRef.current.get(id) ?? file;
       if (!blob || !spec) return;
       setBusy(true);
       try {
-        const { png, meta } = await cropOne(blob, file?.name ?? 'image.png', spec, box);
+        const { png, meta } = await cropOne(blob, file?.name ?? 'image.png', spec, box, angle);
         setResults((prev) =>
           prev.map((r) => (r.id === id ? { ...r, pngDataUrl: `data:image/png;base64,${png}`, meta, flagged: false } : r))
         );
@@ -255,8 +279,19 @@ export default function Home() {
     pushLog('■ stopping…');
   }, []);
 
+  const onResume = useCallback(async () => {
+    if (!spec) return;
+    setBusy(true);
+    try {
+      await runBatch(spec, resumeIndexRef.current, true);
+    } finally {
+      setBusy(false);
+    }
+  }, [spec, runBatch]);
+
   const onStartOver = useCallback(() => {
     abortRef.current = false;
+    resumeIndexRef.current = 0;
     setPhase('setup');
     setResults([]);
     setSpec(null);
@@ -287,10 +322,11 @@ export default function Home() {
           initialW={dims.w}
           initialH={dims.h}
           initialInstruction={instruction || undefined}
+          initialMode={mode}
         />
       )}
 
-      {phase === 'processing' && (
+      {phase === 'processing' && mode === 'default' && (
         <Visualizer
           currentName={current.name}
           currentUrl={current.url}
@@ -303,6 +339,22 @@ export default function Home() {
         />
       )}
 
+      {phase === 'processing' && mode !== 'default' && (
+        <div className="mx-auto max-w-md space-y-4 pt-10 text-center">
+          <p className="text-lg">{mode === 'manual' ? 'Preparing images for manual editing…' : 'Cropping…'}</p>
+          <div className="h-2 w-full overflow-hidden rounded-full bg-espresso/10">
+            <div
+              className="h-full rounded-full bg-plum transition-all duration-200"
+              style={{ width: `${filesRef.current.length ? ((current.index + 1) / filesRef.current.length) * 100 : 0}%` }}
+            />
+          </div>
+          <p className="text-sm text-espresso/60">
+            {Math.min(current.index + 1, filesRef.current.length)} / {filesRef.current.length}
+            {mode === 'manual' ? ' — then you’ll adjust each one' : ' — you’ll review them next'}
+          </p>
+        </div>
+      )}
+
       {phase === 'review' && (
         <Carousel
           results={results}
@@ -311,6 +363,8 @@ export default function Home() {
           onEditFlagged={onEditFlagged}
           onDownload={onDownload}
           onStartOver={onStartOver}
+          onResume={onResume}
+          remaining={Math.max(0, filesRef.current.length - resumeIndexRef.current)}
           busy={busy}
         />
       )}
@@ -321,7 +375,8 @@ export default function Home() {
           originalUrl={urlsRef.current.get(editingItem.id) ?? ''}
           outW={dims.w}
           outH={dims.h}
-          queuePos={`${results.filter((r) => r.flagged).length - editQueue.length + 1} of ${results.filter((r) => r.flagged).length || editQueue.length}`}
+          references={results.filter((r) => r.id !== editingItem.id)}
+          queuePos={`${editTotal - editQueue.length + 1} of ${editTotal}`}
           onSave={onSaveEdit}
           onSkip={advanceEdit}
           busy={busy}

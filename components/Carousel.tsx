@@ -10,10 +10,12 @@ interface Props {
   onEditFlagged: () => void;
   onDownload: () => void;
   onStartOver: () => void;
+  onResume: () => void;
+  remaining: number;
   busy: boolean;
 }
 
-export default function Carousel({ results, onToggleFlag, onFeedbackRerun, onEditFlagged, onDownload, onStartOver, busy }: Props) {
+export default function Carousel({ results, onToggleFlag, onFeedbackRerun, onEditFlagged, onDownload, onStartOver, onResume, remaining, busy }: Props) {
   const [i, setI] = useState(0);
   const [showGrid, setShowGrid] = useState(true);
   const [showGhost, setShowGhost] = useState(false);
@@ -40,12 +42,35 @@ export default function Carousel({ results, onToggleFlag, onFeedbackRerun, onEdi
 
   if (!cur) return null;
 
+  const lowConfCount = results.filter((r) => r.flagged && r.meta.lowConfidence).length;
+
   return (
     <div className="mx-auto max-w-3xl space-y-6">
       <h2 className="text-center text-2xl">Sanity check</h2>
       <p className="text-center text-sm text-espresso/60">
         Arrow keys to browse, <kbd className="rounded bg-espresso/10 px-1">f</kbd> to flag. Toggle the ghost overlay to compare alignment with the previous image.
       </p>
+
+      {remaining > 0 && (
+        <div className="flex flex-col items-center gap-2 rounded-xl border border-plum/40 bg-blush/20 p-3 text-center">
+          <p className="text-sm text-espresso/80">
+            Batch was stopped — {results.length} done, <strong>{remaining}</strong> not yet cropped. Fix anything here, then pick up where you left off.
+          </p>
+          <button
+            onClick={onResume}
+            disabled={busy}
+            className="rounded-lg bg-plum px-5 py-2 text-porcelain hover:bg-berry disabled:opacity-40"
+          >
+            Resume — crop remaining {remaining}
+          </button>
+        </div>
+      )}
+
+      {lowConfCount > 0 && (
+        <p className="mx-auto max-w-xl rounded-lg bg-berry/10 px-4 py-2 text-center text-sm text-berry">
+          {lowConfCount} crop{lowConfCount === 1 ? ' was' : 's were'} auto-flagged — detection was unsure (tricky subject or background). They&apos;re framed to the full photo as a safe default; use manual edit to refine.
+        </p>
+      )}
 
       <div className="flex items-center justify-center gap-4">
         <button onClick={() => step(-1)} className="rounded-full border border-espresso/25 px-4 py-2 hover:bg-blush/30">←</button>

@@ -21,9 +21,11 @@ export async function POST(req: NextRequest) {
     }
 
     const buf = Buffer.from(await file.arrayBuffer());
-    const det = await detectSubject(buf);
+    const det = await detectSubject(buf, !!spec.straighten);
 
+    // Manual edit sends an explicit crop box and (optionally) a rotation angle.
     let box;
+    let angle = spec.straighten ? det.angle : 0;
     const rawBox = form.get('cropBox');
     if (typeof rawBox === 'string') {
       const b = JSON.parse(rawBox);
@@ -31,12 +33,27 @@ export async function POST(req: NextRequest) {
     } else {
       box = computeCropBox(det, spec, outW, outH);
     }
+    const rawAngle = form.get('angle');
+    if (typeof rawAngle === 'string' && rawAngle !== '') {
+      const a = parseFloat(rawAngle);
+      if (Number.isFinite(a)) angle = Math.max(-45, Math.min(45, a));
+    }
 
-    const png = await renderCrop(buf, box, outW, outH);
+    const png = await renderCrop(buf, box, outW, outH, angle, det.bg);
 
     return NextResponse.json({
       png: png.toString('base64'),
-      meta: { ...det, cropBox: box },
+      meta: {
+        srcW: det.srcW,
+        srcH: det.srcH,
+        figure: det.figure,
+        centerFace: det.centerFace,
+        centerFigure: det.centerFigure,
+        angle,
+        bg: det.bg,
+        lowConfidence: det.lowConfidence,
+        cropBox: box,
+      },
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'crop failed';

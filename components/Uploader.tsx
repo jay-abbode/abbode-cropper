@@ -1,23 +1,32 @@
 'use client';
 
 import { useCallback, useRef, useState } from 'react';
+import type { RunMode } from '@/lib/types';
 
 interface Props {
-  onStart: (files: File[], outW: number, outH: number, instruction: string) => void;
+  onStart: (files: File[], outW: number, outH: number, instruction: string, mode: RunMode) => void;
   busy: boolean;
   initialFiles?: File[];
   initialW?: number;
   initialH?: number;
   initialInstruction?: string;
+  initialMode?: RunMode;
 }
 
 const ACCEPT = /\.(jpe?g|png|webp|tiff?)$/i;
 
-export default function Uploader({ onStart, busy, initialFiles, initialW, initialH, initialInstruction }: Props) {
+const MODES: { id: RunMode; label: string; blurb: string }[] = [
+  { id: 'instant', label: 'Instant', blurb: 'Crops silently, as fast as possible. Review & fix afterward.' },
+  { id: 'default', label: 'Default', blurb: 'Watch it work; stop and resume any time.' },
+  { id: 'manual', label: 'Full manual', blurb: 'You crop every image by hand. For tricky items.' },
+];
+
+export default function Uploader({ onStart, busy, initialFiles, initialW, initialH, initialInstruction, initialMode }: Props) {
   const [files, setFiles] = useState<File[]>(initialFiles ?? []);
   const [outW, setOutW] = useState(initialW ?? 750);
   const [outH, setOutH] = useState(initialH ?? 750);
   const [instruction, setInstruction] = useState(initialInstruction ?? 'Center the product perfectly.');
+  const [mode, setMode] = useState<RunMode>(initialMode ?? 'default');
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -67,6 +76,25 @@ export default function Uploader({ onStart, busy, initialFiles, initialW, initia
         )}
       </div>
 
+      {/* processing mode */}
+      <div>
+        <span className="text-sm text-espresso/70">Mode</span>
+        <div className="mt-1 grid grid-cols-3 gap-2">
+          {MODES.map((m) => (
+            <button
+              key={m.id}
+              onClick={() => setMode(m.id)}
+              className={`rounded-xl border-2 p-3 text-left transition ${
+                mode === m.id ? 'border-plum bg-blush/25' : 'border-espresso/15 hover:border-plum/50'
+              }`}
+            >
+              <span className="block font-medium">{m.label}</span>
+              <span className="mt-0.5 block text-xs leading-snug text-espresso/60">{m.blurb}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
       <div className="flex items-end gap-4">
         <label className="block">
           <span className="text-sm text-espresso/70">Width (px)</span>
@@ -94,7 +122,9 @@ export default function Uploader({ onStart, busy, initialFiles, initialW, initia
       </div>
 
       <label className="block">
-        <span className="text-sm text-espresso/70">Exactly what do you want?</span>
+        <span className="text-sm text-espresso/70">
+          {mode === 'manual' ? 'Starting crop (you’ll adjust each by hand)' : 'Exactly what do you want?'}
+        </span>
         <textarea
           value={instruction}
           onChange={(e) => setInstruction(e.target.value)}
@@ -106,10 +136,10 @@ export default function Uploader({ onStart, busy, initialFiles, initialW, initia
 
       <button
         disabled={busy || files.length === 0 || !outW || !outH}
-        onClick={() => onStart(files, outW, outH, instruction)}
+        onClick={() => onStart(files, outW, outH, instruction, mode)}
         className="w-full rounded-xl bg-espresso px-6 py-3 text-lg text-porcelain transition hover:bg-plum disabled:opacity-40"
       >
-        Crop Images
+        {mode === 'manual' ? 'Start manual editing' : mode === 'instant' ? 'Crop now' : 'Crop images'}
       </button>
     </div>
   );

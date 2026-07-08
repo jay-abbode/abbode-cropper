@@ -8,24 +8,28 @@ interface Props {
   originalUrl: string;
   outW: number;
   outH: number;
-  queuePos: string; // e.g. "1 of 3"
-  onSave: (id: string, box: { left: number; top: number; width: number; height: number }) => Promise<void>;
+  queuePos: string;
+  references: ImageResult[]; // other completed crops usable as a ghost overlay
+  onSave: (id: string, box: { left: number; top: number; width: number; height: number }, angle: number) => Promise<void>;
   onSkip: () => void;
   busy: boolean;
 }
 
 const VIEW = 460;
 
-export default function ManualEditor({ item, originalUrl, outW, outH, queuePos, onSave, onSkip, busy }: Props) {
+export default function ManualEditor({ item, originalUrl, outW, outH, queuePos, references, onSave, onSkip, busy }: Props) {
   const [box, setBox] = useState(item.meta.cropBox);
+  const [angle, setAngle] = useState(item.meta.angle ?? 0);
+  const [ghostId, setGhostId] = useState<string | null>(null);
   const dragRef = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
 
   const aspect = outW / outH;
   const viewW = aspect >= 1 ? VIEW : VIEW * aspect;
   const viewH = aspect >= 1 ? VIEW / aspect : VIEW;
   const scale = viewW / box.width; // display px per source px
+  const bgCss = `rgb(${item.meta.bg?.[0] ?? 255}, ${item.meta.bg?.[1] ?? 252}, ${item.meta.bg?.[2] ?? 247})`;
+  const ghost = references.find((r) => r.id === ghostId) ?? null;
 
-  // position the full original image so that the crop box fills the viewport
   const imgStyle = useMemo(
     () => ({
       width: item.meta.srcW * scale,
@@ -41,8 +45,12 @@ export default function ManualEditor({ item, originalUrl, outW, outH, queuePos, 
   };
   const onPointerMove = (e: React.PointerEvent) => {
     if (!dragRef.current) return;
-    const dx = (e.clientX - dragRef.current.x) / scale;
-    const dy = (e.clientY - dragRef.current.y) / scale;
+    // convert screen delta -> source delta, accounting for preview rotation
+    const a = (-angle * Math.PI) / 180;
+    const sx = e.clientX - dragRef.current.x;
+    const sy = e.clientY - dragRef.current.y;
+    const dx = (Math.cos(a) * sx - Math.sin(a) * sy) / scale;
+    const dy = (Math.sin(a) * sx + Math.cos(a) * sy) / scale;
     setBox((b) => ({ ...b, left: dragRef.current!.left - dx, top: dragRef.current!.top - dy }));
   };
   const onPointerUp = () => (dragRef.current = null);
@@ -61,30 +69,41 @@ export default function ManualEditor({ item, originalUrl, outW, outH, queuePos, 
   );
 
   const zoomPct = Math.round((item.meta.cropBox.width / box.width) * 100);
+  const reset = () => { setBox(item.meta.cropBox); setAngle(item.meta.angle ?? 0); };
 
   return (
     <div className="mx-auto max-w-xl space-y-4">
       <h2 className="text-center text-2xl">Manual edit — {queuePos}</h2>
-      <p className="text-center text-sm text-espresso/60">{item.name} · drag to reposition, scroll or slider to zoom</p>
+      <p className="text-center text-sm text-espresso/60">{item.name} · drag to reposition, scroll or slider to zoom, slider to rotate</p>
 
       <div
-        className="relative mx-auto cursor-grab touch-none overflow-hidden rounded-xl border-2 border-plum bg-white active:cursor-grabbing"
-        style={{ width: viewW, height: viewH }}
+        className="relative mx-auto cursor-grab touch-none overflow-hidden rounded-xl border-2 border-plum active:cursor-grabbing"
+        style={{ width: viewW, height: viewH, background: bgCss }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onWheel={(e) => zoom(e.deltaY > 0 ? 1.04 : 0.96)}
       >
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={originalUrl} alt="" draggable={false} className="pointer-events-none absolute left-0 top-0 max-w-none select-none" style={imgStyle} />
+        {/* rotation layer — rotates about the viewport center, which is the crop-box center */}
+        <div className="absolute inset-0" style={{ transform: `rotate(${angle}deg)`, transformOrigin: '50% 50%' }}>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={originalUrl} alt="" draggable={false} className="pointer-events-none absolute left-0 top-0 max-w-none select-none" style={imgStyle} />
+        </div>
+        {/* ghost reference overlay (already in output framing) */}
+        {ghost && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={ghost.pngDataUrl} alt="" className="pointer-events-none absolute inset-0 h-full w-full object-contain opacity-40" />
+        )}
+        {/* center guides */}
         <div className="pointer-events-none absolute inset-0">
           <div className="absolute left-1/2 top-0 h-full w-px bg-berry/50" />
           <div className="absolute left-0 top-1/2 h-px w-full bg-berry/50" />
         </div>
       </div>
 
+      {/* zoom */}
       <div className="flex items-center justify-center gap-3">
-        <span className="text-sm text-espresso/60">zoom</span>
+        <span className="w-14 text-right text-sm text-espresso/60">zoom</span>
         <input
           type="range"
           min={40}
@@ -104,15 +123,59 @@ export default function ManualEditor({ item, originalUrl, outW, outH, queuePos, 
         <span className="w-12 text-sm text-espresso/60">{zoomPct}%</span>
       </div>
 
+      {/* rotate */}
+      <div className="flex items-center justify-center gap-3">
+        <span className="w-14 text-right text-sm text-espresso/60">rotate</span>
+        <input
+          type="range"
+          min={-45}
+          max={45}
+          step={0.5}
+          value={angle}
+          onChange={(e) => setAngle(parseFloat(e.target.value))}
+          className="w-56 accent-berry"
+        />
+        <span className="w-12 text-sm text-espresso/60">{angle.toFixed(1)}°</span>
+        <button onClick={() => setAngle(0)} className="text-xs text-espresso/50 underline">level</button>
+      </div>
+
+      {/* ghost reference picker */}
+      {references.length > 0 && (
+        <div className="rounded-lg border border-espresso/15 bg-white/60 p-2">
+          <p className="mb-1 text-center text-xs text-espresso/60">
+            Ghost reference — overlay a good crop to match its placement {ghost ? `(showing ${ghost.name})` : ''}
+          </p>
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <button
+              onClick={() => setGhostId(null)}
+              className={`rounded px-2 py-1 text-xs ${ghostId === null ? 'bg-plum text-porcelain' : 'border border-espresso/25'}`}
+            >
+              none
+            </button>
+            {references.map((r) => (
+              <button
+                key={r.id}
+                onClick={() => setGhostId(r.id === ghostId ? null : r.id)}
+                className={`relative h-12 w-12 overflow-hidden rounded border-2 ${r.id === ghostId ? 'border-plum' : 'border-transparent'}`}
+                title={r.name}
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={r.pngDataUrl} alt="" className="h-full w-full object-cover" />
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="flex justify-center gap-3">
-        <button onClick={() => setBox(item.meta.cropBox)} className="rounded-lg border border-espresso/25 px-4 py-2 hover:bg-blush/30">
-          Reset
+        <button onClick={reset} className="rounded-lg border border-espresso/25 px-4 py-2 hover:bg-blush/30">
+          Reset to original
         </button>
         <button onClick={onSkip} disabled={busy} className="rounded-lg border border-espresso/25 px-4 py-2 hover:bg-blush/30 disabled:opacity-40">
           Skip
         </button>
         <button
-          onClick={() => onSave(item.id, box)}
+          onClick={() => onSave(item.id, box, angle)}
           disabled={busy}
           className="rounded-lg bg-espresso px-6 py-2 text-porcelain hover:bg-plum disabled:opacity-40"
         >
