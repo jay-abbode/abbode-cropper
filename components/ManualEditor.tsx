@@ -71,7 +71,7 @@ export default function ManualEditor({ items, index, originalUrl, outW, outH, on
   const aspect = outW / outH;
   const viewW = aspect >= 1 ? VIEW : VIEW * aspect;
   const viewH = aspect >= 1 ? VIEW / aspect : VIEW;
-  const scale = viewW / box.width;
+  const scale = viewW / Math.max(1, box.width);
   const bgCss = `rgb(${meta?.bg?.[0] ?? 255}, ${meta?.bg?.[1] ?? 252}, ${meta?.bg?.[2] ?? 247})`;
   const references = items.filter((r) => r.id !== item?.id && !r.pending && r.pngDataUrl);
   const ghost = references.find((r) => r.id === ghostId) ?? null;
@@ -88,17 +88,19 @@ export default function ManualEditor({ items, index, originalUrl, outW, outH, on
   if (!item || !meta) return null;
 
   const onPointerDown = (e: React.PointerEvent) => {
-    (e.target as Element).setPointerCapture(e.pointerId);
+    try { (e.target as Element).setPointerCapture(e.pointerId); } catch { /* capture is best-effort */ }
     dragRef.current = { x: e.clientX, y: e.clientY, left: box.left, top: box.top };
   };
   const onPointerMove = (e: React.PointerEvent) => {
-    if (!dragRef.current) return;
+    const d = dragRef.current;
+    if (!d) return;
     const a = (-angle * Math.PI) / 180;
-    const sx = e.clientX - dragRef.current.x;
-    const sy = e.clientY - dragRef.current.y;
+    const sx = e.clientX - d.x;
+    const sy = e.clientY - d.y;
     const dx = (Math.cos(a) * sx - Math.sin(a) * sy) / scale;
     const dy = (Math.sin(a) * sx + Math.cos(a) * sy) / scale;
-    setBox((b) => ({ ...b, left: dragRef.current!.left - dx, top: dragRef.current!.top - dy }));
+    const base = { left: d.left, top: d.top }; // captured — safe even if pointer-up nulls the ref before React runs this updater
+    setBox((b) => ({ ...b, left: base.left - dx, top: base.top - dy }));
   };
   const onPointerUp = () => (dragRef.current = null);
 

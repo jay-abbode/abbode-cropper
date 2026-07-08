@@ -1,11 +1,12 @@
 'use client';
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Uploader from '@/components/Uploader';
 import Visualizer from '@/components/Visualizer';
 import Carousel from '@/components/Carousel';
 import ManualEditor, { Draft } from '@/components/ManualEditor';
 import { prepareImage, probeImage } from '@/lib/resize';
+import { saveState, savePng, saveBlob, loadState, loadAll, clearSession, SavedSession } from '@/lib/session';
 import type { CropSpec, CropMeta, ImageResult, RunMode } from '@/lib/types';
 
 type Phase = 'setup' | 'processing' | 'review' | 'editing';
@@ -49,6 +50,12 @@ export default function Home() {
     name: '', url: '', meta: null, index: 0,
   });
   const [editIndex, setEditIndex] = useState(0);
+  const [restorable, setRestorable] = useState<SavedSession | null>(null);
+  const editIndexRef = useRef(0);
+  const phaseRef = useRef<Phase>('setup');
+  const persistRef = useRef<() => void>(() => {});
+  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const savedPngsRef = useRef<Map<string, string>>(new Map()); // id -> last dataUrl written to IndexedDB (reference compare)
 
   const pushLog = (l: string) => setLog((prev) => [...prev, l]);
 
@@ -58,17 +65,22 @@ export default function Home() {
       signal?.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
     });
 
-  const idOf = (i: number) => `${i}-${filesRef.current[i]?.name ?? i}`;
+  // Results-first id lookup: after a restored session there are no File objects,
+  // so ids must come from the results themselves.
+  const idAt = (i: number) => resultsRef.current[i]?.id ?? `${i}-${filesRef.current[i]?.name ?? i}`;
   const indexOf = (id: string) => parseInt(id.split('-')[0], 10);
 
   const ensurePrepared = useCallback(async (i: number): Promise<{ blob: Blob; url: string }> => {
-    const id = idOf(i);
+    const id = idAt(i);
     const cachedBlob = preparedRef.current.get(id);
     const cachedUrl = urlsRef.current.get(id);
     if (cachedBlob && cachedUrl) return { blob: cachedBlob, url: cachedUrl };
-    const prep = await prepareImage(filesRef.current[i]);
+    const file = filesRef.current[i];
+    if (!file) throw new Error('this image isn’t in the browser session — re-select the folder and start over to edit it');
+    const prep = await prepareImage(file);
     preparedRef.current.set(id, prep.blob);
     urlsRef.current.set(id, prep.url);
+    void saveBlob(id, prep.blob); // best-effort: lets a restored session keep editing
     return prep;
   }, []);
 
@@ -135,7 +147,7 @@ export default function Home() {
       for (let i = startIndex; i < files.length; i++) {
         if (abortRef.current) { resumeIndexRef.current = i; break; }
         const f = files[i];
-        const id = idOf(i);
+        const id = idAt(i);
         setCurrent({ name: f.name, url: urlsRef.current.get(id) ?? '', meta: null, index: i });
         pushLog(`▸ ${f.name}: preparing image…`);
         const t0 = performance.now();
@@ -204,7 +216,7 @@ export default function Home() {
           const i = cursor++;
           if (i >= files.length) return;
           const f = files[i];
-          const id = idOf(i);
+          const id = idAt(i);
           try {
             const { blob } = await ensurePrepared(i);
             let out: { png: string; meta: CropMeta };
@@ -243,7 +255,7 @@ export default function Home() {
   // largest centered aspect-correct box. No server call.
   const ensureMeta = useCallback(
     (i: number): Promise<void> => {
-      const id = idOf(i);
+      const id = idAt(i);
       const existing = resultsRef.current.find((r) => r.id === id);
       if (existing?.meta) return Promise.resolve();
       const inFlight = metaPromisesRef.current.get(id);
@@ -279,7 +291,7 @@ export default function Home() {
     resumeIndexRef.current = files.length;
     setResults(() =>
       files.map((f, i) => {
-        const id = idOf(i);
+        const id = idAt(i);
         let raw = rawUrlsRef.current.get(id);
         if (!raw) {
           raw = URL.createObjectURL(f);
@@ -321,6 +333,9 @@ export default function Home() {
         setDims({ w, h });
         setInstruction(instr);
         setError(null);
+        setRestorable(null);
+        savedPngsRef.current.clear();
+        void clearSession(); // a new run supersedes the old saved session
 
         if (runMode === 'manual') {
           setSpec(null);
@@ -344,6 +359,10 @@ export default function Home() {
   const onFeedbackRerun = useCallback(
     async (feedback: string) => {
       if (!spec) return;
+      if (!filesRef.current.length) {
+        setError('This is a restored session — the original photos aren’t in memory, so a batch rerun isn’t available. You can still edit and download everything; to rerun, start over and re-select the folder.');
+        return;
+      }
       setBusy(true);
       try {
         setLog([`Applying feedback: “${feedback}”`]);
@@ -368,7 +387,7 @@ export default function Home() {
         await ensureMeta(i);
         setEditIndex(i);
         setPhase('editing');
-        if (i + 1 < filesRef.current.length) void ensureMeta(i + 1).catch(() => {});
+        if (i + 1 < resultsRef.current.length) void ensureMeta(i + 1).catch(() => {});
       } catch (e) {
         setError(e instanceof Error ? e.message : 'could not open image');
       } finally {
@@ -385,12 +404,12 @@ export default function Home() {
 
   const onNavigate = useCallback(
     async (i: number) => {
-      const clamped = Math.max(0, Math.min(filesRef.current.length - 1, i));
+      const clamped = Math.max(0, Math.min(resultsRef.current.length - 1, i));
       setBusy(true);
       try {
         await ensureMeta(clamped);
         setEditIndex(clamped);
-        if (clamped + 1 < filesRef.current.length) void ensureMeta(clamped + 1).catch(() => {});
+        if (clamped + 1 < resultsRef.current.length) void ensureMeta(clamped + 1).catch(() => {});
       } catch (e) {
         setError(e instanceof Error ? e.message : 'could not open image');
       } finally {
@@ -403,16 +422,15 @@ export default function Home() {
   const onSaveEdit = useCallback(
     async (id: string, box: Draft['box'], angle: number) => {
       const idx = indexOf(id);
-      const file = filesRef.current[idx];
-      if (!file) return;
+      const item = resultsRef.current.find((r) => r.id === id);
+      if (!item) return;
       setBusy(true);
       try {
         const { blob } = await ensurePrepared(idx);
-        const item = resultsRef.current.find((r) => r.id === id);
-        const { png, meta } = await cropOne(blob, file.name, {
+        const { png, meta } = await cropOne(blob, item.name, {
           box,
           angle,
-          bg: item?.meta?.bg,
+          bg: item.meta?.bg,
           quality: 'full',
         });
         setResults((prev) =>
@@ -421,7 +439,7 @@ export default function Home() {
           )
         );
         draftsRef.current.delete(id);
-        if (idx + 1 < filesRef.current.length) await onNavigate(idx + 1);
+        if (idx + 1 < resultsRef.current.length) await onNavigate(idx + 1);
       } catch (e) {
         setError(e instanceof Error ? e.message : 'edit failed');
       } finally {
@@ -433,31 +451,150 @@ export default function Home() {
 
   const onDoneEditing = useCallback(() => setPhase('review'), []);
 
+  /* ---------- Session autosave (IndexedDB) ---------- */
+
+  // persistRef always holds a closure over the CURRENT render's values.
+  useEffect(() => {
+    editIndexRef.current = editIndex;
+    phaseRef.current = phase;
+    persistRef.current = () => {
+      const rs = resultsRef.current;
+      if (rs.length === 0) return;
+      const doc: SavedSession = {
+        version: 1,
+        savedAt: Date.now(),
+        mode,
+        dims,
+        instruction,
+        spec,
+        results: rs.map((r) => ({ id: r.id, name: r.name, meta: r.meta, flagged: r.flagged, pending: r.pending })),
+        drafts: Array.from(draftsRef.current.entries()),
+        editIndex: editIndexRef.current,
+        phase: phaseRef.current === 'editing' ? 'editing' : 'review',
+      };
+      void saveState(doc);
+      for (const r of rs) {
+        if (r.pngDataUrl && savedPngsRef.current.get(r.id) !== r.pngDataUrl) {
+          savedPngsRef.current.set(r.id, r.pngDataUrl);
+          void savePng(r.id, r.pngDataUrl);
+        }
+      }
+    };
+  });
+
+  const schedulePersist = useCallback(() => {
+    if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = setTimeout(() => persistRef.current(), 800);
+  }, []);
+
+  // Autosave whenever meaningful state changes (results stream in, edits save,
+  // flags toggle, navigation moves, phase changes).
+  useEffect(() => {
+    schedulePersist();
+  }, [results, editIndex, phase, schedulePersist]);
+
+  // Offer restore on load if a previous session exists.
+  useEffect(() => {
+    let cancelled = false;
+    void loadState().then((s) => {
+      if (!cancelled && s && s.version === 1 && s.results?.length) setRestorable(s);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const onRestore = useCallback(async () => {
+    const s = restorable;
+    if (!s) return;
+    setBusy(true);
+    try {
+      const [blobs, pngs] = await Promise.all([loadAll<Blob>('blobs'), loadAll<string>('pngs')]);
+      preparedRef.current.clear();
+      urlsRef.current.forEach((u) => URL.revokeObjectURL(u));
+      urlsRef.current.clear();
+      blobs.forEach((b, id) => {
+        preparedRef.current.set(id, b);
+        urlsRef.current.set(id, URL.createObjectURL(b));
+      });
+      filesRef.current = []; // originals aren't persisted; prepared blobs carry the session
+      draftsRef.current = new Map(s.drafts);
+      savedPngsRef.current.clear();
+      modeRef.current = s.mode;
+      setMode(s.mode);
+      setDims(s.dims);
+      setInstruction(s.instruction);
+      setSpec(s.spec);
+      const restored: ImageResult[] = s.results.map((r) => {
+        const png = pngs.get(r.id) ?? '';
+        if (png) savedPngsRef.current.set(r.id, png);
+        return {
+          id: r.id,
+          name: r.name,
+          pngDataUrl: png,
+          meta: r.meta,
+          flagged: r.flagged,
+          pending: png ? false : true, // anything without a stored render gets re-rendered on download
+          originalThumbUrl: urlsRef.current.get(r.id),
+        };
+      });
+      setResults(() => restored);
+      resumeIndexRef.current = restored.length; // batch resume needs original Files — not available here
+      setError(null);
+      setRestorable(null);
+      const idx = Math.max(0, Math.min(restored.length - 1, s.editIndex));
+      if (s.phase === 'editing' && restored[idx]) {
+        try {
+          await ensureMeta(idx);
+          setEditIndex(idx);
+          setPhase('editing');
+          return;
+        } catch { /* fall through to review */ }
+      }
+      setPhase('review');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'could not restore the previous session');
+    } finally {
+      setBusy(false);
+    }
+  }, [restorable, ensureMeta, setResults]);
+
+  const onDiscardRestore = useCallback(() => {
+    setRestorable(null);
+    void clearSession();
+  }, []);
+
   /* ---------- Download (renders any still-pending manual items first) ---------- */
 
   const onDownload = useCallback(async () => {
     setBusy(true);
     try {
       const pending = resultsRef.current.filter((r) => r.pending);
+      const unrenderable: string[] = [];
       for (let k = 0; k < pending.length; k++) {
         const id = pending[k].id;
         const idx = indexOf(id);
         setBusyNote(`Rendering ${k + 1} of ${pending.length} untouched images with the default centered crop…`);
-        await ensureMeta(idx);
-        const item = resultsRef.current.find((r) => r.id === id);
-        if (!item?.meta) continue;
-        const { blob } = await ensurePrepared(idx);
-        const { png, meta } = await cropOne(blob, filesRef.current[idx].name, {
-          box: item.meta.cropBox,
-          angle: item.meta.angle,
-          bg: item.meta.bg,
-          quality: 'full',
-        });
-        setResults((prev) =>
-          prev.map((r) => (r.id === id ? { ...r, pngDataUrl: `data:image/png;base64,${png}`, meta, pending: false } : r))
-        );
+        try {
+          await ensureMeta(idx);
+          const item = resultsRef.current.find((r) => r.id === id);
+          if (!item?.meta) { unrenderable.push(pending[k].name); continue; }
+          const { blob } = await ensurePrepared(idx);
+          const { png, meta } = await cropOne(blob, (resultsRef.current.find((x) => x.id === id)?.name ?? "image.png"), {
+            box: item.meta.cropBox,
+            angle: item.meta.angle,
+            bg: item.meta.bg,
+            quality: 'full',
+          });
+          setResults((prev) =>
+            prev.map((r) => (r.id === id ? { ...r, pngDataUrl: `data:image/png;base64,${png}`, meta, pending: false } : r))
+          );
+        } catch {
+          unrenderable.push(pending[k].name); // e.g. restored session without this image's data — skip, keep the rest
+        }
       }
       setBusyNote(null);
+      if (unrenderable.length) {
+        setError(`${unrenderable.length} image${unrenderable.length === 1 ? ' wasn’t' : 's weren’t'} in the saved session and couldn’t be rendered (${unrenderable.join(', ')}) — the ZIP has everything else. Re-select the folder to redo them.`);
+      }
 
       const JSZip = (await import('jszip')).default;
       const zip = new JSZip();
@@ -489,6 +626,10 @@ export default function Home() {
 
   const onResume = useCallback(async () => {
     if (!spec) return;
+    if (!filesRef.current.length) {
+      setError('This is a restored session — the original photos aren’t in memory, so the batch can’t resume. Everything already cropped is here to edit and download.');
+      return;
+    }
     setBusy(true);
     try {
       await runBatch(spec, resumeIndexRef.current, true);
@@ -505,8 +646,11 @@ export default function Home() {
     setSpec(null);
     setLog([]);
     setError(null);
+    setRestorable(null);
     draftsRef.current.clear();
     metaPromisesRef.current.clear();
+    savedPngsRef.current.clear();
+    void clearSession();
   }, [setResults]);
 
   const editingItem = phase === 'editing' ? results[editIndex] : null;
@@ -520,6 +664,23 @@ export default function Home() {
 
       {error && (
         <p className="mx-auto mb-6 max-w-2xl rounded-lg bg-berry/10 px-4 py-3 text-sm text-berry">{error}</p>
+      )}
+
+      {phase === 'setup' && restorable && (
+        <div className="mx-auto mb-6 flex max-w-2xl flex-col items-center gap-2 rounded-xl border border-plum/40 bg-blush/20 p-4 text-center">
+          <p className="text-sm text-espresso/80">
+            <strong>Resume previous session?</strong> {restorable.results.length} image{restorable.results.length === 1 ? '' : 's'} ({restorable.dims.w}×{restorable.dims.h}), autosaved{' '}
+            {Math.max(1, Math.round((Date.now() - restorable.savedAt) / 60000))} min ago — crops, flags, and in-progress edits included.
+          </p>
+          <div className="flex gap-3">
+            <button onClick={onRestore} disabled={busy} className="rounded-lg bg-plum px-5 py-2 text-porcelain hover:bg-berry disabled:opacity-40">
+              {busy ? 'Restoring…' : 'Resume session'}
+            </button>
+            <button onClick={onDiscardRestore} disabled={busy} className="rounded-lg border border-espresso/25 px-4 py-2 hover:bg-blush/30 disabled:opacity-40">
+              Discard
+            </button>
+          </div>
+        </div>
       )}
 
       {phase === 'setup' && (
@@ -590,7 +751,7 @@ export default function Home() {
           onSave={onSaveEdit}
           onDone={onDoneEditing}
           getDraft={(id) => draftsRef.current.get(id)}
-          setDraft={(id, d) => draftsRef.current.set(id, d)}
+          setDraft={(id, d) => { draftsRef.current.set(id, d); schedulePersist(); }}
           busy={busy}
         />
       )}
