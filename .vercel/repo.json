@@ -1,0 +1,11 @@
+{
+  "remoteName": "origin",
+  "projects": [
+    {
+      "id": "prj_p4FMPUvfrAfHYdNDETxxDIhU7s94",
+      "name": "abbode-cropper",
+      "directory": ".",
+      "orgId": "team_dRrqE23NXUHabl5nHG4KfF0N"
+    }
+  ]
+}
