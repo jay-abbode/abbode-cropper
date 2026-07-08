@@ -5,6 +5,7 @@ import Uploader from '@/components/Uploader';
 import Visualizer from '@/components/Visualizer';
 import Carousel from '@/components/Carousel';
 import ManualEditor from '@/components/ManualEditor';
+import { prepareImage } from '@/lib/resize';
 import type { CropSpec, ImageResult } from '@/lib/types';
 
 type Phase = 'setup' | 'processing' | 'review' | 'editing';
@@ -15,7 +16,8 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
 
   const filesRef = useRef<File[]>([]);
-  const urlsRef = useRef<Map<string, string>>(new Map()); // id -> object URL of original
+  const urlsRef = useRef<Map<string, string>>(new Map()); // id -> object URL of the uploaded image
+  const preparedRef = useRef<Map<string, Blob>>(new Map()); // id -> possibly-downscaled blob actually sent
   const [dims, setDims] = useState({ w: 750, h: 750 });
   const [instruction, setInstruction] = useState('');
   const [spec, setSpec] = useState<CropSpec | null>(null);
@@ -44,17 +46,27 @@ export default function Home() {
   }, []);
 
   const cropOne = useCallback(
-    async (file: File, useSpec: CropSpec, box?: { left: number; top: number; width: number; height: number }) => {
+    async (blob: Blob, name: string, useSpec: CropSpec, box?: { left: number; top: number; width: number; height: number }) => {
       const form = new FormData();
-      form.append('file', file);
+      form.append('file', blob, name);
       form.append('outW', String(dims.w));
       form.append('outH', String(dims.h));
       form.append('spec', JSON.stringify(useSpec));
       if (box) form.append('cropBox', JSON.stringify(box));
       const res = await fetch('/api/crop', { method: 'POST', body: form });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || `crop failed for ${file.name}`);
-      return json as { png: string; meta: ImageResult['meta'] };
+      const raw = await res.text();
+      if (!res.ok) {
+        let msg = `server error ${res.status}`;
+        try {
+          msg = JSON.parse(raw).error || msg;
+        } catch {
+          if (res.status === 413 || /request en|too large/i.test(raw)) {
+            msg = 'image too large to upload even after downscaling — tell me and I’ll shrink harder';
+          }
+        }
+        throw new Error(msg);
+      }
+      return JSON.parse(raw) as { png: string; meta: ImageResult['meta'] };
     },
     [dims]
   );
@@ -70,16 +82,24 @@ export default function Home() {
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         const id = `${i}-${f.name}`;
-        let url = urlsRef.current.get(id);
-        if (!url) {
-          url = URL.createObjectURL(f);
-          urlsRef.current.set(id, url);
-        }
-        setCurrent({ name: f.name, url, meta: null, index: i });
-        pushLog(`▸ ${f.name}: estimating background…`);
+        setCurrent({ name: f.name, url: urlsRef.current.get(id) ?? '', meta: null, index: i });
+        pushLog(`▸ ${f.name}: preparing image…`);
         const t0 = performance.now();
         try {
-          const { png, meta } = await cropOne(f, useSpec);
+          let blob = preparedRef.current.get(id);
+          let url = urlsRef.current.get(id);
+          if (!blob || !url) {
+            const prep = await prepareImage(f);
+            blob = prep.blob;
+            url = prep.url;
+            preparedRef.current.set(id, blob);
+            urlsRef.current.set(id, url);
+            if (blob.size < f.size * 0.9) {
+              pushLog(`  downscaled ${(f.size / 1e6).toFixed(1)}→${(blob.size / 1e6).toFixed(1)} MB for upload`);
+            }
+          }
+          setCurrent({ name: f.name, url, meta: null, index: i });
+          const { png, meta } = await cropOne(blob, f.name, useSpec);
           pushLog(`  masking subject → figure ${Math.round(meta.figure[2] - meta.figure[0])}×${Math.round(meta.figure[3] - meta.figure[1])}px`);
           setCurrent({ name: f.name, url, meta, index: i });
           if (useSpec.mode === 'face') pushLog(`  symmetry axis @ x=${Math.round(meta.centerFace[0])} (front face)`);
@@ -110,6 +130,7 @@ export default function Home() {
         filesRef.current = files;
         urlsRef.current.forEach((u) => URL.revokeObjectURL(u));
         urlsRef.current.clear();
+        preparedRef.current.clear();
         setDims({ w, h });
         setInstruction(instr);
         setLog([`Parsing instruction: “${instr}”`]);
@@ -162,10 +183,11 @@ export default function Home() {
     async (id: string, box: { left: number; top: number; width: number; height: number }) => {
       const idx = parseInt(id.split('-')[0], 10);
       const file = filesRef.current[idx];
-      if (!file || !spec) return;
+      const blob = preparedRef.current.get(id) ?? file;
+      if (!blob || !spec) return;
       setBusy(true);
       try {
-        const { png, meta } = await cropOne(file, spec, box);
+        const { png, meta } = await cropOne(blob, file?.name ?? 'image.png', spec, box);
         setResults((prev) =>
           prev.map((r) => (r.id === id ? { ...r, pngDataUrl: `data:image/png;base64,${png}`, meta, flagged: false } : r))
         );
