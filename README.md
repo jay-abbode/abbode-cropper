@@ -9,18 +9,17 @@ carousel, then rerun with feedback or manually nudge flagged images. Download as
 - Instruction parsing: Claude (claude-sonnet-4-6) via ANTHROPIC_API_KEY; keyword
   fallback if unset.
 - Auth: NextAuth v5 Google, restricted to @shopabbode.com. `AUTH_DISABLED=true` for local dev.
-- Deploy target: Google Cloud Run (Dockerfile included, listens on $PORT).
+- Deploy target: Vercel (connect the GitHub repo; no extra config).
 
 ## Local
 cp .env.example .env.local   # AUTH_DISABLED=true is enough to start
 npm install
 npm run dev
 
-## Cloud Run
-gcloud run deploy abbode-cropper --source . --region us-east1 \
-  --allow-unauthenticated --memory 2Gi --cpu 2
-Then wire OAuth (see chat walkthrough) and redeploy with env vars set.
+## Vercel
+Import the repo at vercel.com/new, add env vars (AUTH_DISABLED=true for a first
+look, or the full auth set), deploy. Pushes to main auto-deploy.
 
 Notes: works best on plain/studio backgrounds; images are processed in memory,
-nothing is stored server-side; one image per request keeps well under Cloud Run's
-32 MB request cap.
+nothing is stored server-side. One image per request keeps each upload well under
+Vercel's 4.5 MB function body limit (product JPGs run ~1–2 MB).
