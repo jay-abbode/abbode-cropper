@@ -26,7 +26,7 @@ interface Loaded {
   close: () => void;
 }
 
-async function load(file: File): Promise<Loaded | null> {
+async function load(file: Blob): Promise<Loaded | null> {
   // Prefer createImageBitmap (fast, honors most orientation); fall back to <img>.
   try {
     const bmp = await createImageBitmap(file);
@@ -109,4 +109,43 @@ export async function prepareImage(file: File): Promise<Prepared> {
   }
 
   return { blob, url: URL.createObjectURL(blob) };
+}
+
+// Lightweight client-side probe: image dimensions + estimated background color
+// (median of border samples on a tiny canvas). Used by full-manual mode to
+// synthesize a starting crop without any server round-trip.
+export interface Probe {
+  width: number;
+  height: number;
+  bg: [number, number, number];
+}
+
+export async function probeImage(blob: Blob): Promise<Probe> {
+  const info = await load(blob);
+  if (!info) return { width: 1000, height: 1000, bg: [255, 252, 247] };
+  const { w, h } = { w: info.w, h: info.h };
+  const S = 48;
+  const canvas = document.createElement('canvas');
+  canvas.width = S;
+  canvas.height = S;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  let bg: [number, number, number] = [255, 252, 247];
+  if (ctx) {
+    info.draw(ctx, S, S);
+    try {
+      const d = ctx.getImageData(0, 0, S, S).data;
+      const rs: number[] = [], gs: number[] = [], bs: number[] = [];
+      for (let y = 0; y < S; y++) {
+        for (let x = 0; x < S; x++) {
+          if (x > 1 && x < S - 2 && y > 1 && y < S - 2) continue; // border ring only
+          const p = (y * S + x) * 4;
+          rs.push(d[p]); gs.push(d[p + 1]); bs.push(d[p + 2]);
+        }
+      }
+      const med = (a: number[]) => { a.sort((m, n) => m - n); return a[a.length >> 1]; };
+      bg = [med(rs), med(gs), med(bs)];
+    } catch { /* tainted canvas or read failure — keep default bg */ }
+  }
+  info.close();
+  return { width: w, height: h, bg };
 }

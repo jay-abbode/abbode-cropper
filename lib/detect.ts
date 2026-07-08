@@ -269,14 +269,18 @@ function medianBg(data: Buffer, w: number, h: number): [number, number, number] 
 
 /* ---------- public API ---------- */
 
-export async function detectSubject(buf: Buffer, straighten = false): Promise<Detection> {
+export type DetectQuality = 'fast' | 'full';
+
+export async function detectSubject(buf: Buffer, straighten = false, quality: DetectQuality = 'full'): Promise<Detection> {
   const base = sharp(buf).rotate(); // honor EXIF orientation
   const meta = await base.metadata();
   const srcW = meta.width ?? 0;
   const srcH = meta.height ?? 0;
   if (!srcW || !srcH) throw new Error('Could not read image dimensions');
 
-  const detW = Math.min(700, srcW);
+  // fast: 450px detection grid + 2 threshold candidates (~3x cheaper); the
+  // low-confidence fallback still applies, so misses flag instead of failing.
+  const detW = Math.min(quality === 'fast' ? 450 : 700, srcW);
   const scale = srcW / detW;
   const detH = Math.max(1, Math.round(srcH / scale));
 
@@ -317,7 +321,8 @@ export async function detectSubject(buf: Buffer, straighten = false): Promise<De
   // Adaptive: ascending thresholds. Low thr captures the most; if it grabs the whole
   // frame (background leaked), raise it. First threshold whose subject doesn't span the
   // whole frame is the maximal clean subject.
-  const candidates = [2, 3, 4, 5, 6].map((k) => Math.max(16, mean + k * std));
+  const ks = quality === 'fast' ? [2.5, 4.5] : [2, 3, 4, 5, 6];
+  const candidates = ks.map((k) => Math.max(16, mean + k * std));
   let chosen: ReturnType<typeof subjectMask> = null;
   for (const thr of candidates) {
     const s = buildAt(thr);
@@ -387,8 +392,10 @@ export async function renderCrop(
   outW: number,
   outH: number,
   angle = 0,
-  bg: [number, number, number] = [255, 252, 247]
+  bg: [number, number, number] = [255, 252, 247],
+  quality: DetectQuality = 'full'
 ): Promise<Buffer> {
+  const png = { compressionLevel: quality === 'fast' ? 6 : 9 }; // both lossless
   const base = sharp(buf).rotate();
   const meta = await base.metadata();
   const srcW = meta.width ?? 0;
@@ -414,7 +421,7 @@ export async function renderCrop(
     return sharp(stage)
       .extract({ left: L + padL, top: T + padT, width: W, height: H })
       .resize(outW, outH, { kernel: sharp.kernel.lanczos3, fit: 'fill' })
-      .png({ compressionLevel: 9 })
+      .png(png)
       .toBuffer();
   }
 
@@ -446,6 +453,6 @@ export async function renderCrop(
   return sharp(rotatedBuf)
     .extract({ left: Math.max(0, exL), top: Math.max(0, exT), width: W, height: H })
     .resize(outW, outH, { kernel: sharp.kernel.lanczos3, fit: 'fill' })
-    .png({ compressionLevel: 9 })
+    .png(png)
     .toBuffer();
 }

@@ -16,9 +16,9 @@ interface Props {
 const ACCEPT = /\.(jpe?g|png|webp|tiff?)$/i;
 
 const MODES: { id: RunMode; label: string; blurb: string }[] = [
-  { id: 'instant', label: 'Instant', blurb: 'Crops silently, as fast as possible. Review & fix afterward.' },
+  { id: 'instant', label: 'Instant', blurb: 'Fastest — crops in parallel with lighter detection. Review after.' },
   { id: 'default', label: 'Default', blurb: 'Watch it work; stop and resume any time.' },
-  { id: 'manual', label: 'Full manual', blurb: 'You crop every image by hand. For tricky items.' },
+  { id: 'manual', label: 'Full manual', blurb: 'Opens instantly. You place every crop yourself.' },
 ];
 
 export default function Uploader({ onStart, busy, initialFiles, initialW, initialH, initialInstruction, initialMode }: Props) {

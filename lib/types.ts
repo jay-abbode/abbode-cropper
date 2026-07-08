@@ -24,7 +24,9 @@ export interface CropMeta {
 export interface ImageResult {
   id: string;
   name: string;
-  pngDataUrl: string;
-  meta: CropMeta;
+  pngDataUrl: string;            // final rendered crop ('' while pending)
+  meta: CropMeta | null;         // null until probed/rendered (manual mode lazy entries)
   flagged: boolean;
+  pending?: boolean;             // manual mode: not yet rendered by the server
+  originalThumbUrl?: string;     // raw upload object URL, for pending previews
 }
