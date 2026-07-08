@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Drop AbbodeBerlin.woff2 into public/fonts and uncomment:
+@font-face {
+  font-family: 'Abbode Berlin';
+  src: url('/fonts/AbbodeBerlin.woff2') format('woff2');
+  font-display: swap;
+}
+*/
+
+body {
+  @apply bg-porcelain text-espresso font-body;
+}
+
+h1, h2, h3 {
+  @apply font-serif;
+}
+
+@keyframes scanline {
+  0% { top: 0%; }
+  100% { top: 100%; }
+}
+@keyframes drawIn {
+  from { opacity: 0; transform: scale(1.06); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes settle {
+  from { opacity: 0; transform: scale(1.15); }
+  to { opacity: 1; transform: scale(1); }
+}
+.anim-scan { animation: scanline 0.9s ease-in-out; }
+.anim-draw { animation: drawIn 0.45s ease-out both; }
+.anim-settle { animation: settle 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
